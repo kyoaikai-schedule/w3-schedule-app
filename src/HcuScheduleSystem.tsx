@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Calendar, CalendarDays, Settings, Moon, Sun, Clock, RefreshCw, AlertCircle, CheckCircle, Plus, Trash2, LogOut, Lock, Download, Upload, Edit2, Save, X, Eye, Users, FileSpreadsheet, Activity, Maximize2, Minimize2, ChevronUp, ChevronDown, RotateCcw } from 'lucide-react';
+import { Calendar, CalendarDays, Settings, Moon, Sun, Clock, RefreshCw, AlertCircle, CheckCircle, Plus, Trash2, LogOut, Lock, Download, Upload, Edit2, Save, X, Eye, Users, FileSpreadsheet, Activity, Maximize2, Minimize2, ChevronUp, ChevronDown, RotateCcw, History } from 'lucide-react';
 import * as XLSX from 'xlsx-js-style';
 import { supabase } from './lib/supabase';
 
@@ -110,11 +110,25 @@ const createDBFunctions = (prefix: string) => {
     );
   };
 
+  const insertAuditLog = async (log: { action: string; user_type?: string; user_name?: string; nurse_id?: number; nurse_name?: string; year?: number; month?: number; day?: number; old_value?: string; new_value?: string; details?: string }) => {
+    try {
+      await supabase.from(t('audit_log')).insert({ ...log, user_type: log.user_type || 'admin' });
+    } catch (e) { console.error('Audit log error:', e); }
+  };
+  const fetchAuditLogs = async (limit: number = 100) => {
+    const { data } = await supabase.from(t('audit_log')).select('*').order('created_at', { ascending: false }).limit(limit);
+    return data || [];
+  };
+  const deleteAuditLogs = async () => {
+    await supabase.from(t('audit_log')).delete().gte('id', 0);
+  };
+
   return {
     t, fetchNursesFromDB, upsertNurseToDB, deleteNurseFromDB,
     fetchRequestsFromDB, upsertRequestToDB, deleteRequestFromDB,
     fetchSchedulesFromDB, saveSchedulesToDB, updateScheduleCellInDB,
     fetchSettingFromDB, saveSettingToDB,
+    insertAuditLog, fetchAuditLogs, deleteAuditLogs,
   };
 };
 
@@ -222,6 +236,7 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
     fetchRequestsFromDB, upsertRequestToDB, deleteRequestFromDB,
     fetchSchedulesFromDB, saveSchedulesToDB, updateScheduleCellInDB,
     fetchSettingFromDB, saveSettingToDB,
+    insertAuditLog, fetchAuditLogs, deleteAuditLogs,
   } = createDBFunctions(dbPrefix);
   // システムモード: 'select' | 'admin' | 'dashboard' | 'adminSchedule' | 'staff'
   const [systemMode, setSystemMode] = useState('select');
@@ -241,6 +256,8 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
   const [adminAsStaff, setAdminAsStaff] = useState(false);
   const [showDevLogin, setShowDevLogin] = useState(false);
   const [showMySchedule, setShowMySchedule] = useState(false);
+  const [showAuditLog, setShowAuditLog] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
   
   // ローディング状態
   const [isLoading, setIsLoading] = useState(true);
@@ -2184,6 +2201,12 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
       await saveSchedulesToDB(targetYear, targetMonth, final);
       saveScheduleToLocalStorage(final);
     });
+    insertAuditLog({
+      action: 'schedule_generate',
+      user_type: 'admin',
+      year: targetYear, month: targetMonth,
+      details: `${targetYear}年${targetMonth + 1}月 勤務表自動生成（${activeNurses.length}名）`,
+    });
     setGenerating(false);
     setGeneratingPhase('');
   };
@@ -2596,12 +2619,23 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
     });
 
     // ④ DB保存（state更新後に実行）
+    const oldVal = _currentRequest;
     setTimeout(() => {
       if (staffNurseId) {
         saveWithStatus(async () => {
           for (const [d, val] of Object.entries(dbChanges)) {
             await saveRequestToDB(staffNurseId, targetYear, targetMonth, Number(d), val);
           }
+        });
+        const staffNurse = nurses.find(n => n.id === staffNurseId);
+        insertAuditLog({
+          action: 'request_change',
+          user_type: adminAsStaff ? 'admin' : 'staff',
+          user_name: staffNurse?.name,
+          nurse_id: staffNurseId,
+          nurse_name: staffNurse?.name,
+          year: targetYear, month: targetMonth, day,
+          old_value: oldVal || '', new_value: dbChanges[day] || '',
         });
       }
     }, 0);
@@ -2781,6 +2815,9 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
                 </button>
                 <button onClick={() => setShowDeadlineSettings(true)} className="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-sm flex items-center gap-1">
                   <Clock size={16} /> 締め切り設定
+                </button>
+                <button onClick={async () => { setAuditLogs(await fetchAuditLogs()); setShowAuditLog(true); }} className="px-3 py-2 bg-orange-50 hover:bg-orange-100 text-orange-700 rounded-lg text-sm flex items-center gap-1">
+                  <History size={16} /> 変更履歴
                 </button>
                 <button onClick={() => { setShowPasswordChange(true); setNewPasswordInput(''); setNewPasswordConfirm(''); setPasswordChangeError(''); }} className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-lg text-sm flex items-center gap-1">
                   <Lock size={16} /> パスワード変更
@@ -3006,6 +3043,81 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
                   className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700">
                   設定を保存
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 変更履歴モーダル */}
+        {showAuditLog && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl p-6 w-full max-w-2xl">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-bold">📋 変更履歴</h3>
+                <div className="flex gap-2 items-center">
+                  <button onClick={async () => {
+                    if (confirm('変更履歴を全て消去しますか？')) {
+                      await deleteAuditLogs();
+                      setAuditLogs([]);
+                    }
+                  }} className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-600 rounded text-xs">
+                    ログを消去
+                  </button>
+                  <button onClick={() => setShowAuditLog(false)} className="p-2 hover:bg-gray-100 rounded-full">
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-[70vh] overflow-y-auto">
+                {auditLogs.length === 0 ? (
+                  <p className="text-center text-gray-400 py-8">変更履歴はありません</p>
+                ) : (
+                  <table className="w-full border-collapse text-xs">
+                    <thead className="sticky top-0 bg-gray-50">
+                      <tr>
+                        <th className="border p-2 text-left">日時</th>
+                        <th className="border p-2 text-center">操作</th>
+                        <th className="border p-2 text-center">操作者</th>
+                        <th className="border p-2 text-center">対象</th>
+                        <th className="border p-2 text-center">変更内容</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditLogs.map((log: any) => (
+                        <tr key={log.id} className="hover:bg-gray-50">
+                          <td className="border p-2 whitespace-nowrap">{new Date(log.created_at).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}</td>
+                          <td className="border p-2 text-center">
+                            <span className={`px-1.5 py-0.5 rounded text-xs ${
+                              log.action === 'shift_change' ? 'bg-blue-100 text-blue-700' :
+                              log.action === 'request_change' ? 'bg-emerald-100 text-emerald-700' :
+                              'bg-purple-100 text-purple-700'
+                            }`}>
+                              {log.action === 'shift_change' ? 'シフト変更' :
+                               log.action === 'request_change' ? '希望変更' :
+                               log.action === 'schedule_generate' ? '自動生成' : log.action}
+                            </span>
+                          </td>
+                          <td className="border p-2 text-center">
+                            <span className={`text-xs ${log.user_type === 'admin' ? 'text-purple-600' : 'text-gray-600'}`}>
+                              {log.user_type === 'admin' ? '管理者' : '職員'}{log.user_name ? ` (${log.user_name})` : ''}
+                            </span>
+                          </td>
+                          <td className="border p-2 text-center">
+                            {log.nurse_name && <span>{log.nurse_name}</span>}
+                            {log.day && <span className="ml-1 text-gray-500">{log.day}日</span>}
+                          </td>
+                          <td className="border p-2 text-center">
+                            {log.old_value || log.new_value ? (
+                              <span>{log.old_value || '空'} → {log.new_value || '空'}</span>
+                            ) : log.details ? (
+                              <span className="text-gray-500">{log.details}</span>
+                            ) : null}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           </div>
@@ -4204,6 +4316,13 @@ const HcuScheduleSystem = ({ department = 'HCU', onBack }: { department?: 'HCU' 
             }
             saveWithStatus(async () => {
               await updateScheduleCellInDB(nurseId, targetYear, targetMonth, dayIndex + 1, newShift);
+            });
+            const targetNurse = activeNurses.find(n => n.id === nurseId);
+            insertAuditLog({
+              action: 'shift_change', user_type: 'admin',
+              nurse_id: nurseId, nurse_name: targetNurse?.name,
+              year: targetYear, month: targetMonth, day: dayIndex + 1,
+              old_value: currentShift || '', new_value: newShift || '',
             });
           };
 
