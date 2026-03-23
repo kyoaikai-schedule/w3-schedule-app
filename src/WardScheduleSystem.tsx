@@ -139,7 +139,7 @@ const createDBFunctions = (prefix: string) => {
 // 固定アクセスコード生成（ID + 名前から常に同じコードを生成）
 const generateFixedAccessCode = (id, name) => {
   let hash = 0;
-  const str = `${id}-${name}-w32025`;
+  const str = `${id}-${name}-hcu2025`;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = ((hash << 5) - hash) + char;
@@ -334,6 +334,9 @@ const WardScheduleSystem = () => {
   const [nurseShiftPrefs, setNurseShiftPrefs] = useState<Record<number, { maxNightShifts: number; noNightShift: boolean; noDayShift: boolean; excludeFromMaxDaysOff: boolean; maxRequests: number; excludeFromGeneration: boolean }>>({});
   const [showNurseShiftPrefs, setShowNurseShiftPrefs] = useState(false);
 
+  // 設定読み込み完了フラグ
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+
   // 夜勤NG組み合わせ
   const [nightNgPairs, setNightNgPairs] = useState<[number, number][]>([]);
   const [showNightNgPairs, setShowNightNgPairs] = useState(false);
@@ -454,6 +457,24 @@ const WardScheduleSystem = () => {
           } catch(e) { console.error('夜勤NGペア解析エラー:', e); }
         }
 
+        // 生成設定の読み込み
+        const savedGenConfig = await fetchSettingFromDB('generateConfig');
+        if (savedGenConfig) {
+          try {
+            const parsed = JSON.parse(savedGenConfig);
+            setGenerateConfig(prev => ({ ...prev, ...parsed }));
+          } catch(e) { console.error('generateConfig解析エラー:', e); }
+        }
+
+        // 締め切り設定の読み込み
+        const savedDeadline = await fetchSettingFromDB('requestDeadline');
+        if (savedDeadline) {
+          try {
+            const parsed = JSON.parse(savedDeadline);
+            setRequestDeadline(prev => ({ ...prev, ...parsed }));
+          } catch(e) { console.error('requestDeadline解析エラー:', e); }
+        }
+
         // 管理者パスワードの読み込み
         const savedPw = await fetchSettingFromDB('adminPassword');
         if (savedPw) {
@@ -462,11 +483,30 @@ const WardScheduleSystem = () => {
       } catch (error: any) {
         console.error('データ読み込みエラー:', error);
       } finally {
+        setSettingsLoaded(true);
         setIsLoading(false);
       }
     };
     loadData();
   }, [targetYear, targetMonth]);
+
+  // generateConfigの変更をDBに保存
+  useEffect(() => {
+    if (!settingsLoaded || !isAdminAuth) return;
+    const timer = setTimeout(() => {
+      saveSettingToDB('generateConfig', JSON.stringify(generateConfig));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [generateConfig, settingsLoaded, isAdminAuth]);
+
+  // requestDeadlineの変更をDBに保存
+  useEffect(() => {
+    if (!settingsLoaded || !isAdminAuth) return;
+    const timer = setTimeout(() => {
+      saveSettingToDB('requestDeadline', JSON.stringify(requestDeadline));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [requestDeadline, settingsLoaded, isAdminAuth]);
 
   // ページ離脱時の確認ダイアログ
   useEffect(() => {
@@ -506,7 +546,7 @@ const WardScheduleSystem = () => {
   // LocalStorageバックアップ保存
   const saveScheduleToLocalStorage = (scheduleData: any) => {
     try {
-      const key = `w3-schedule-backup-${targetYear}-${targetMonth}`;
+      const key = `hcu-schedule-backup-${targetYear}-${targetMonth}`;
       localStorage.setItem(key, JSON.stringify(scheduleData));
     } catch (e) {
       console.error('LocalStorage保存エラー:', e);
@@ -516,7 +556,7 @@ const WardScheduleSystem = () => {
   // LocalStorageバックアップ復元
   const loadScheduleFromLocalStorage = () => {
     try {
-      const key = `w3-schedule-backup-${targetYear}-${targetMonth}`;
+      const key = `hcu-schedule-backup-${targetYear}-${targetMonth}`;
       const data = localStorage.getItem(key);
       return data ? JSON.parse(data) : null;
     } catch (e) {
@@ -528,7 +568,7 @@ const WardScheduleSystem = () => {
   // LocalStorageバックアップ削除
   const clearScheduleFromLocalStorage = () => {
     try {
-      const key = `w3-schedule-backup-${targetYear}-${targetMonth}`;
+      const key = `hcu-schedule-backup-${targetYear}-${targetMonth}`;
       localStorage.removeItem(key);
     } catch (e) {
       console.error('LocalStorage削除エラー:', e);
@@ -538,7 +578,7 @@ const WardScheduleSystem = () => {
   // バージョン管理: LocalStorage読み込み
   const loadVersionsFromLocalStorage = (year: number, month: number) => {
     try {
-      const key = `scheduleVersions-3W-${year}-${month}`;
+      const key = `scheduleVersions-${dbPrefix}-${year}-${month}`;
       const data = localStorage.getItem(key);
       if (data) {
         const parsed = JSON.parse(data);
@@ -558,7 +598,7 @@ const WardScheduleSystem = () => {
   // バージョン管理: LocalStorage保存
   const saveVersionsToLocalStorage = (versions: ScheduleVersion[], nextVer: number) => {
     try {
-      const key = `scheduleVersions-3W-${targetYear}-${targetMonth}`;
+      const key = `scheduleVersions-${dbPrefix}-${targetYear}-${targetMonth}`;
       localStorage.setItem(key, JSON.stringify({ versions, nextVersionNumber: nextVer }));
     } catch (e) {
       console.error('バージョン保存エラー:', e);
@@ -2763,7 +2803,6 @@ const WardScheduleSystem = () => {
               職員用（休み希望入力）
             </button>
           </div>
-
 
           <p className="text-center text-xs text-gray-400 mt-8">
             データはサーバーに安全に保存されます
